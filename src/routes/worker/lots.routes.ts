@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ok, notFound } from '../../utils/response';
+import { ok, notFound, badRequest } from '../../utils/response';
 
 const router = Router();
 
@@ -38,6 +38,16 @@ router.get('/:id', async (req: Request, res: Response) => {
     .first();
 
   if (!lot) { notFound(res, 'Lot not found'); return; }
+
+  // Verify worker is assigned to the lot's current stage
+  const assignments = await db('user_stage_assignments')
+    .where({ user_id: req.user!.sub })
+    .pluck('stage_id');
+
+  if (lot.current_stage_id && !assignments.includes(lot.current_stage_id)) {
+    badRequest(res, 'You do not have access to this lot');
+    return;
+  }
 
   // Allowed next stages (from current stage)
   const nextStages = await db('stage_connections as sc')

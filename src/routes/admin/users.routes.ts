@@ -27,7 +27,7 @@ router.get('/', async (req: Request, res: Response) => {
   if (role) query = query.where({ role });
   if (search) query = query.where('name', 'ilike', `%${search}%`);
 
-  const [{ count }] = await query.clone().count('id as count');
+  const [{ count }] = await query.clone().clearSelect().count('id as count');
   const data = await query.orderBy('created_at', 'desc').limit(limit).offset(offset);
 
   paginated(res, data, Number(count), page, limit);

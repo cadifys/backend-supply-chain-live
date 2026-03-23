@@ -5,6 +5,17 @@ import { injectTenantDb } from '../../middleware/tenant';
 import { ok } from '../../utils/response';
 import { getPagination } from '../../utils/pagination';
 
+function toCSV(rows: any[], columns: { key: string; label: string }[]): string {
+  const header = columns.map(c => `"${c.label}"`).join(',');
+  const lines = rows.map(row =>
+    columns.map(c => {
+      const val = row[c.key] ?? '';
+      return `"${String(val).replace(/"/g, '""')}"`;
+    }).join(',')
+  );
+  return [header, ...lines].join('\r\n');
+}
+
 const router = Router();
 
 router.use(authenticate, requireMinRole('manager'), injectTenantDb);
@@ -75,9 +86,10 @@ router.get('/workers', async (req: Request, res: Response) => {
   const today = new Date().toISOString().split('T')[0];
 
   const workers = await db('users as u')
-    .where({ 'u.role': 'worker', 'u.is_active': true })
-    .orWhere({ 'u.role': 'lead', 'u.is_active': true })
+    .whereIn('u.role', ['worker', 'lead'])
+    .where({ 'u.is_active': true })
     .select('u.id', 'u.name', 'u.email', 'u.phone', 'u.role')
+    .orderBy('u.name')
     .limit(limit)
     .offset(offset);
 
@@ -122,12 +134,13 @@ router.get('/transactions', async (req: Request, res: Response) => {
 
   let query = db('stage_transactions as st')
     .join('stages as s', 'st.stage_id', 's.id')
-    .join('lots as l', 'st.lot_id', 'l.id')
+    .leftJoin('lots as l', 'st.lot_id', 'l.id')
     .join('users as u', 'st.worker_id', 'u.id')
     .leftJoin('machines as m', 'st.machine_id', 'm.id')
     .whereBetween('st.transaction_date', [from, to])
     .select(
-      'st.*',
+      'st.id', 'st.transaction_date', 'st.unit', 'st.input_qty', 'st.processed_qty',
+      'st.instock_qty', 'st.output_qty', 'st.loss_qty', 'st.notes',
       's.name as stage_name', 'l.lot_number', 'l.crop', 'l.variety',
       'u.name as worker_name', 'm.name as machine_name'
     );
@@ -135,10 +148,113 @@ router.get('/transactions', async (req: Request, res: Response) => {
   if (stageId) query = query.where({ 'st.stage_id': stageId });
   if (workerId) query = query.where({ 'st.worker_id': workerId });
 
-  const [{ count }] = await query.clone().count('st.id as count');
+  const [{ count }] = await query.clone().clearSelect().count('st.id as count');
   const data = await query.orderBy('st.transaction_date', 'desc').limit(limit).offset(offset);
 
   ok(res, { data, total: Number(count), page, limit });
+});
+
+/**
+ * GET /api/manager/stages
+ * Read-only stage list for manager (for filters)
+ */
+router.get('/stages', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+  const stages = await db('stages').where({ is_active: true }).orderBy('stage_order');
+  ok(res, stages);
+});
+
+/**
+ * GET /api/manager/workers/:id/history
+ * Full history of a specific worker for manager view
+ */
+router.get('/workers/:id/history', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+  const { dateFrom, dateTo } = req.query;
+  const from = (dateFrom as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const to = (dateTo as string) || new Date().toISOString().split('T')[0];
+
+  const worker = await db('users').where({ id: req.params.id }).select('id', 'name', 'role', 'email', 'phone').first();
+  if (!worker) { ok(res, null); return; }
+
+  const transactions = await db('stage_transactions as st')
+    .join('stages as s', 'st.stage_id', 's.id')
+    .leftJoin('lots as l', 'st.lot_id', 'l.id')
+    .leftJoin('machines as m', 'st.machine_id', 'm.id')
+    .where({ 'st.worker_id': req.params.id })
+    .whereBetween('st.transaction_date', [from, to])
+    .select(
+      'st.id', 'st.transaction_date', 'st.unit', 'st.input_qty', 'st.processed_qty',
+      'st.instock_qty', 'st.output_qty', 'st.loss_qty', 'st.notes',
+      's.name as stage_name', 'l.lot_number', 'l.crop', 'm.name as machine_name'
+    )
+    .orderBy('st.transaction_date', 'desc');
+
+  const summary = await db('stage_transactions')
+    .where({ worker_id: req.params.id })
+    .whereBetween('transaction_date', [from, to])
+    .select(
+      db.raw('SUM(input_qty) as total_input'),
+      db.raw('SUM(processed_qty) as total_processed'),
+      db.raw('SUM(output_qty) as total_output'),
+      db.raw('SUM(loss_qty) as total_loss'),
+      db.raw('COUNT(id) as transaction_count'),
+      db.raw('COUNT(DISTINCT stage_id) as stages_worked')
+    )
+    .first();
+
+  ok(res, { worker, summary, transactions, dateFrom: from, dateTo: to });
+});
+
+/**
+ * GET /api/manager/export?dateFrom=&dateTo=&stageId=&workerId=
+ * Export transactions as CSV
+ */
+router.get('/export', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+  const { dateFrom, dateTo, stageId, workerId } = req.query;
+  const from = (dateFrom as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const to = (dateTo as string) || new Date().toISOString().split('T')[0];
+
+  let query = db('stage_transactions as st')
+    .join('stages as s', 'st.stage_id', 's.id')
+    .join('users as u', 'st.worker_id', 'u.id')
+    .leftJoin('lots as l', 'st.lot_id', 'l.id')
+    .leftJoin('machines as m', 'st.machine_id', 'm.id')
+    .whereBetween('st.transaction_date', [from, to])
+    .select(
+      'st.transaction_date', 'u.name as worker_name', 'u.role as worker_role',
+      's.name as stage_name', 'l.lot_number', 'l.crop',
+      'm.name as machine_name', 'st.unit',
+      'st.input_qty', 'st.processed_qty', 'st.instock_qty', 'st.output_qty', 'st.loss_qty',
+      'st.notes'
+    )
+    .orderBy('st.transaction_date', 'desc');
+
+  if (stageId) query = query.where({ 'st.stage_id': stageId });
+  if (workerId) query = query.where({ 'st.worker_id': workerId });
+
+  const rows = await query.limit(10000);
+  const csv = toCSV(rows, [
+    { key: 'transaction_date', label: 'Date' },
+    { key: 'worker_name', label: 'Worker' },
+    { key: 'worker_role', label: 'Role' },
+    { key: 'stage_name', label: 'Stage' },
+    { key: 'lot_number', label: 'Lot #' },
+    { key: 'crop', label: 'Crop' },
+    { key: 'machine_name', label: 'Machine' },
+    { key: 'unit', label: 'Unit' },
+    { key: 'input_qty', label: 'Input' },
+    { key: 'processed_qty', label: 'Processed' },
+    { key: 'instock_qty', label: 'In-Stock' },
+    { key: 'output_qty', label: 'Output' },
+    { key: 'loss_qty', label: 'Loss' },
+    { key: 'notes', label: 'Notes' },
+  ]);
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename=transactions_${from}_to_${to}.csv`);
+  res.send(csv);
 });
 
 export default router;

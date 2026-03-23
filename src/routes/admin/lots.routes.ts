@@ -27,7 +27,7 @@ router.get('/', async (req: Request, res: Response) => {
     });
   }
 
-  const [{ count }] = await query.clone().count('l.id as count');
+  const [{ count }] = await query.clone().clearSelect().count('l.id as count');
   const data = await query.orderBy('l.created_at', 'desc').limit(limit).offset(offset);
   paginated(res, data, Number(count), page, limit);
 });
@@ -52,7 +52,8 @@ router.get('/:id', async (req: Request, res: Response) => {
     .leftJoin('machines as m', 'st.machine_id', 'm.id')
     .where({ 'st.lot_id': lot.id })
     .select(
-      'st.*',
+      'st.id', 'st.transaction_date', 'st.unit', 'st.input_qty', 'st.processed_qty',
+      'st.instock_qty', 'st.output_qty', 'st.loss_qty', 'st.notes', 'st.status',
       's.name as stage_name',
       'u.name as worker_name',
       'm.name as machine_name'
@@ -87,6 +88,12 @@ router.post('/', async (req: Request, res: Response) => {
   const exists = await db('lots').where({ lot_number: parsed.data.lotNumber }).first();
   if (exists) { badRequest(res, 'Lot number already exists'); return; }
 
+  // Validate currentStageId if provided
+  if (parsed.data.currentStageId) {
+    const stage = await db('stages').where({ id: parsed.data.currentStageId, is_active: true }).first();
+    if (!stage) { badRequest(res, 'Starting stage not found or inactive'); return; }
+  }
+
   const [lot] = await db('lots').insert({
     lot_number: parsed.data.lotNumber,
     crop: parsed.data.crop,
@@ -97,7 +104,7 @@ router.post('/', async (req: Request, res: Response) => {
     supplier_name: parsed.data.supplierName,
     intake_date: parsed.data.intakeDate || new Date().toISOString().split('T')[0],
     notes: parsed.data.notes,
-    created_by: req.user!.sub,
+    created_by: req.user!.role === 'admin' ? null : req.user!.sub,
   }).returning('*');
 
   created(res, lot, 'Lot created');

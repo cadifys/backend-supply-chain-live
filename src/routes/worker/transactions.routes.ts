@@ -19,19 +19,19 @@ router.get('/', async (req: Request, res: Response) => {
 
   const query = db('stage_transactions as st')
     .join('stages as s', 'st.stage_id', 's.id')
-    .join('lots as l', 'st.lot_id', 'l.id')
+    .leftJoin('lots as l', 'st.lot_id', 'l.id')
     .leftJoin('machines as m', 'st.machine_id', 'm.id')
     .where({ 'st.worker_id': req.user!.sub })
     .whereBetween('st.transaction_date', [from, to])
     .select(
-      'st.id', 'st.transaction_date', 'st.input_qty', 'st.processed_qty',
+      'st.id', 'st.transaction_date', 'st.unit', 'st.input_qty', 'st.processed_qty',
       'st.instock_qty', 'st.output_qty', 'st.loss_qty', 'st.notes', 'st.status', 'st.created_at',
       's.name as stage_name',
-      'l.lot_number', 'l.crop', 'l.variety', 'l.unit',
+      'l.lot_number', 'l.crop', 'l.variety',
       'm.name as machine_name'
     );
 
-  const [{ count }] = await query.clone().count('st.id as count');
+  const [{ count }] = await query.clone().clearSelect().count('st.id as count');
   const data = await query.orderBy('st.transaction_date', 'desc').orderBy('st.created_at', 'desc').limit(limit).offset(offset);
 
   // Daily summary for the period
@@ -84,12 +84,12 @@ router.get('/today-summary', async (req: Request, res: Response) => {
       ),
 
     db('stage_transactions as st')
-      .join('lots as l', 'st.lot_id', 'l.id')
+      .leftJoin('lots as l', 'st.lot_id', 'l.id')
       .join('stages as s', 'st.stage_id', 's.id')
       .where({ 'st.worker_id': req.user!.sub })
       .orderBy('st.created_at', 'desc')
       .limit(5)
-      .select('st.id', 'st.transaction_date', 'st.input_qty', 'st.output_qty', 'st.loss_qty', 'l.lot_number', 'l.crop', 's.name as stage_name'),
+      .select('st.id', 'st.transaction_date', 'st.unit', 'st.input_qty', 'st.output_qty', 'st.loss_qty', 'l.lot_number', 'l.crop', 's.name as stage_name'),
   ]);
 
   ok(res, { todayStats, weekStats, recentTransactions });
@@ -101,9 +101,10 @@ router.get('/today-summary', async (req: Request, res: Response) => {
  */
 router.post('/', async (req: Request, res: Response) => {
   const schema = z.object({
-    lotId: z.string().uuid(),
+    lotId: z.string().uuid().optional(),          // Lot is optional
     stageId: z.string().uuid(),
     machineId: z.string().uuid().optional(),
+    unit: z.string().min(1).default('kg'),        // Flexible unit
     transactionDate: z.string().optional(),
     inputQty: z.number().min(0),
     processedQty: z.number().min(0),
@@ -115,35 +116,60 @@ router.post('/', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { badRequest(res, 'Validation failed', parsed.error.flatten()); return; }
 
-  const { lotId, stageId, machineId, transactionDate, inputQty, processedQty, instockQty, outputQty, notes } = parsed.data;
+  const { lotId, stageId, machineId, unit, transactionDate, inputQty, processedQty, instockQty, outputQty, notes } = parsed.data;
 
-  // Validate: output can't exceed processed
-  if (outputQty > processedQty) {
-    badRequest(res, 'Output quantity cannot exceed processed quantity');
+  // Validate quantities: output + instock <= processed (remainder = loss)
+  if (outputQty + instockQty > processedQty + 0.0001) { // small epsilon for float rounding
+    badRequest(res, 'Output + In-stock quantity cannot exceed processed quantity');
     return;
   }
 
   const db = req.tenantDb!;
 
-  // Verify lot exists and is active
-  const lot = await db('lots').where({ id: lotId, status: 'active' }).first();
-  if (!lot) { notFound(res, 'Lot not found or not active'); return; }
+  // Worker must be assigned to this stage
+  const assignment = await db('user_stage_assignments')
+    .where({ user_id: req.user!.sub, stage_id: stageId })
+    .first();
+  if (!assignment) {
+    badRequest(res, 'You are not assigned to this stage');
+    return;
+  }
 
-  // Verify stage exists
+  // Stage must exist and be active
   const stage = await db('stages').where({ id: stageId, is_active: true }).first();
-  if (!stage) { notFound(res, 'Stage not found'); return; }
+  if (!stage) { notFound(res, 'Stage not found or inactive'); return; }
+
+  // If lot provided: validate it and check it's at this stage
+  if (lotId) {
+    const lot = await db('lots').where({ id: lotId, status: 'active' }).first();
+    if (!lot) { notFound(res, 'Lot not found or not active'); return; }
+    if (lot.current_stage_id && lot.current_stage_id !== stageId) {
+      badRequest(res, 'This lot is not currently at your stage');
+      return;
+    }
+  }
+
+  // Machine must belong to this stage if provided
+  if (machineId) {
+    const machine = await db('machines').where({ id: machineId, stage_id: stageId, is_active: true }).first();
+    if (!machine) {
+      badRequest(res, 'Machine not found or not assigned to this stage');
+      return;
+    }
+  }
 
   const [transaction] = await db('stage_transactions').insert({
-    lot_id: lotId,
+    lot_id: lotId || null,
     stage_id: stageId,
-    machine_id: machineId,
+    machine_id: machineId || null,
     worker_id: req.user!.sub,
+    unit,
     transaction_date: transactionDate || new Date().toISOString().split('T')[0],
     input_qty: inputQty,
     processed_qty: processedQty,
     instock_qty: instockQty,
     output_qty: outputQty,
-    notes,
+    notes: notes || null,
   }).returning('*');
 
   created(res, transaction, 'Transaction logged');
@@ -155,11 +181,11 @@ router.post('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   const db = req.tenantDb!;
   const transaction = await db('stage_transactions as st')
-    .join('lots as l', 'st.lot_id', 'l.id')
+    .leftJoin('lots as l', 'st.lot_id', 'l.id')
     .join('stages as s', 'st.stage_id', 's.id')
     .leftJoin('machines as m', 'st.machine_id', 'm.id')
     .where({ 'st.id': req.params.id, 'st.worker_id': req.user!.sub })
-    .select('st.*', 'l.lot_number', 'l.crop', 'l.variety', 'l.unit', 's.name as stage_name', 'm.name as machine_name')
+    .select('st.*', 'l.lot_number', 'l.crop', 'l.variety', 's.name as stage_name', 'm.name as machine_name')
     .first();
 
   if (!transaction) { notFound(res, 'Transaction not found'); return; }

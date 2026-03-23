@@ -1,12 +1,17 @@
 import app from './app';
 import { env } from './config/env';
 import { logger } from './utils/logger';
-import { testCentralConnection } from './db/central';
+import { testCentralConnection, centralDb } from './db/central';
+import { patchAllTenantSchemas } from './db/tenant';
 
 async function start() {
   try {
     // Test DB connection
     await testCentralConnection();
+
+    // Patch existing tenant schemas with new columns
+    const orgs = await centralDb('central.organizations').where({ is_active: true }).pluck('slug');
+    await patchAllTenantSchemas(orgs);
 
     const server = app.listen(env.port, () => {
       logger.info(`🚀 Server running on port ${env.port} [${env.nodeEnv}]`);

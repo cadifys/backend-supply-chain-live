@@ -65,11 +65,11 @@ router.get('/outgoing', async (req: Request, res: Response) => {
  */
 router.post('/', async (req: Request, res: Response) => {
   const schema = z.object({
-    lotId: z.string().uuid(),
+    lotId: z.string().uuid().optional(),    // Lot is optional
     fromStageId: z.string().uuid(),
     toStageId: z.string().uuid(),
     qty: z.number().positive(),
-    unit: z.string().default('kg'),
+    unit: z.string().min(1).default('kg'),
     notes: z.string().optional(),
   });
 
@@ -79,33 +79,42 @@ router.post('/', async (req: Request, res: Response) => {
   const { lotId, fromStageId, toStageId, qty, unit, notes } = parsed.data;
 
   if (fromStageId === toStageId) {
-    badRequest(res, 'From and To stages must be different');
+    badRequest(res, 'Source and destination stages must be different');
     return;
   }
 
   const db = req.tenantDb!;
 
-  // Verify this connection is valid (exists in stage_connections)
-  const connection = await db('stage_connections')
-    .where({ from_stage_id: fromStageId, to_stage_id: toStageId, is_active: true })
+  // Worker must be assigned to the fromStage
+  const assignment = await db('user_stage_assignments')
+    .where({ user_id: req.user!.sub, stage_id: fromStageId })
     .first();
-
-  if (!connection) {
-    badRequest(res, 'Material transfer not allowed between these stages');
+  if (!assignment) {
+    badRequest(res, 'You are not assigned to the source stage');
     return;
   }
 
-  const lot = await db('lots').where({ id: lotId, status: 'active' }).first();
-  if (!lot) { notFound(res, 'Lot not found or not active'); return; }
+  // Destination stage must exist and be active
+  const toStage = await db('stages').where({ id: toStageId, is_active: true }).first();
+  if (!toStage) {
+    notFound(res, 'Destination stage not found or inactive');
+    return;
+  }
+
+  // If lot provided, validate it
+  if (lotId) {
+    const lot = await db('lots').where({ id: lotId, status: 'active' }).first();
+    if (!lot) { notFound(res, 'Lot not found or not active'); return; }
+  }
 
   const [transfer] = await db('material_transfers').insert({
-    lot_id: lotId,
+    lot_id: lotId || null,
     from_stage_id: fromStageId,
     to_stage_id: toStageId,
     qty,
     unit,
     requested_by: req.user!.sub,
-    notes,
+    notes: notes || null,
   }).returning('*');
 
   created(res, transfer, 'Transfer request sent');
@@ -118,6 +127,15 @@ router.put('/:id/accept', async (req: Request, res: Response) => {
   const db = req.tenantDb!;
   const transfer = await db('material_transfers').where({ id: req.params.id, status: 'pending' }).first();
   if (!transfer) { notFound(res, 'Transfer not found or already processed'); return; }
+
+  // Verify accepting worker is assigned to the destination stage
+  const assignment = await db('user_stage_assignments')
+    .where({ user_id: req.user!.sub, stage_id: transfer.to_stage_id })
+    .first();
+  if (!assignment) {
+    badRequest(res, 'You are not assigned to the destination stage of this transfer');
+    return;
+  }
 
   // Update the lot's current stage
   await db.transaction(async (trx) => {

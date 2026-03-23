@@ -6,6 +6,24 @@ import { logger } from '../utils/logger';
 const tenantConnections = new Map<string, Knex>();
 
 /**
+ * Patch existing tenant schemas with new columns (idempotent).
+ * Called at server startup for all active orgs.
+ */
+export async function patchAllTenantSchemas(orgSlugs: string[]): Promise<void> {
+  for (const slug of orgSlugs) {
+    const schema = `org_${slug}`;
+    const db = getTenantDb(schema);
+    try {
+      // Add unit column to stage_transactions (idempotent)
+      await db.raw(`ALTER TABLE stage_transactions ADD COLUMN IF NOT EXISTS unit VARCHAR(20) DEFAULT 'kg'`);
+      logger.info(`Schema patched: ${schema}`);
+    } catch (err: any) {
+      logger.warn(`Schema patch skipped for ${schema}: ${err.message}`);
+    }
+  }
+}
+
+/**
  * Get (or create) a knex connection scoped to the org's schema.
  * The search_path ensures all queries land in org_<slug> schema automatically.
  */
@@ -171,11 +189,12 @@ async function runTenantMigrations(db: Knex, schema: string): Promise<void> {
       machine_id UUID REFERENCES ${s}.machines(id),
       worker_id UUID REFERENCES ${s}.users(id),
       transaction_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      unit VARCHAR(20) NOT NULL DEFAULT 'kg',
       input_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
       processed_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
       instock_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
       output_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
-      loss_qty NUMERIC(12,3) GENERATED ALWAYS AS (processed_qty - output_qty) STORED,
+      loss_qty NUMERIC(12,3) GENERATED ALWAYS AS (processed_qty - output_qty - instock_qty) STORED,
       notes TEXT,
       status VARCHAR(20) DEFAULT 'completed' CHECK (status IN ('pending','completed')),
       created_at TIMESTAMPTZ DEFAULT NOW(),

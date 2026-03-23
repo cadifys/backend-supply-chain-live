@@ -30,7 +30,7 @@ router.get('/', async (req: Request, res: Response) => {
 
   let query = centralDb('central.organizations as o')
     .leftJoin(
-      centralDb('central.org_admins').count('id as count').groupBy('org_id').as('ac'),
+      centralDb('central.org_admins').select('org_id').count('id as count').groupBy('org_id').as('ac'),
       'ac.org_id', 'o.id'
     )
     .select('o.*', centralDb.raw('COALESCE(ac.count, 0) as admin_count'));
@@ -39,7 +39,7 @@ router.get('/', async (req: Request, res: Response) => {
     query = query.where('o.name', 'ilike', `%${search}%`);
   }
 
-  const [{ count }] = await query.clone().count('o.id as count');
+  const [{ count }] = await query.clone().clearSelect().count('o.id as count');
   const data = await query.orderBy('o.created_at', 'desc').limit(limit).offset(offset);
 
   paginated(res, data, Number(count), page, limit);
@@ -83,10 +83,11 @@ router.post('/', async (req: Request, res: Response) => {
 
   // Transaction: create org + admin in central DB
   const trx = await centralDb.transaction();
-  let orgId: string;
+  let org: any;
+  let admin: any;
 
   try {
-    const [org] = await trx('central.organizations').insert({
+    [org] = await trx('central.organizations').insert({
       name,
       slug,
       industry,
@@ -96,16 +97,14 @@ router.post('/', async (req: Request, res: Response) => {
       created_by: req.user!.sub,
     }).returning('*');
 
-    orgId = org.id;
-
-    await trx('central.org_admins').insert({
-      org_id: orgId,
+    [admin] = await trx('central.org_admins').insert({
+      org_id: org.id,
       name: adminName,
       email: adminEmail,
       phone: adminPhone,
       password_hash: passwordHash,
       created_by: req.user!.sub,
-    });
+    }).returning('id', 'name', 'email', 'phone', 'is_active', 'created_at');
 
     await trx.commit();
   } catch (err) {
@@ -114,14 +113,28 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   // Bootstrap tenant schema (outside transaction - schema creation is DDL)
-  await bootstrapTenantSchema(orgSchema);
+  await bootstrapTenantSchema(`org_${slug}`);
 
   created(res, {
-    orgId,
-    orgSchema,
-    adminEmail,
+    organization: {
+      id: org.id,
+      name: org.name,
+      slug: org.slug,
+      industry: org.industry,
+      contactEmail: org.contact_email,
+      contactPhone: org.contact_phone,
+      address: org.address,
+      isActive: org.is_active,
+      orgSchema,
+      createdAt: org.created_at,
+    },
+    admin: {
+      id: admin.id,
+      name: admin.name,
+      email: admin.email,
+      phone: admin.phone,
+    },
     tempPassword: adminPassword ? undefined : tempPassword,
-    message: adminPassword ? undefined : 'Share the temp password with the admin securely',
   }, 'Organization created successfully');
 });
 
