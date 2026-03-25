@@ -17,7 +17,7 @@ router.get('/incoming', async (req: Request, res: Response) => {
   if (!assignments.length) { ok(res, []); return; }
 
   const transfers = await db('material_transfers as mt')
-    .join('lots as l', 'mt.lot_id', 'l.id')
+    .leftJoin('lots as l', 'mt.lot_id', 'l.id')
     .join('stages as fs', 'mt.from_stage_id', 'fs.id')
     .join('stages as ts', 'mt.to_stage_id', 'ts.id')
     .leftJoin('users as u', 'mt.requested_by', 'u.id')
@@ -36,6 +36,34 @@ router.get('/incoming', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/worker/transfers/received
+ * Transfers accepted by this worker — shows received material waiting to be processed
+ */
+router.get('/received', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+
+  const transfers = await db('material_transfers as mt')
+    .leftJoin('lots as l', 'mt.lot_id', 'l.id')
+    .join('stages as fs', 'mt.from_stage_id', 'fs.id')
+    .join('stages as ts', 'mt.to_stage_id', 'ts.id')
+    .leftJoin('users as u', 'mt.requested_by', 'u.id')
+    .where({ 'mt.accepted_by': req.user!.sub, 'mt.status': 'accepted' })
+    .whereRaw(`mt.responded_at >= NOW() - INTERVAL '7 days'`)
+    .select(
+      'mt.id', 'mt.qty', 'mt.unit', 'mt.responded_at',
+      'mt.lot_id', 'mt.to_stage_id',
+      'l.lot_number', 'l.crop',
+      'fs.name as from_stage_name',
+      'ts.name as to_stage_name',
+      'u.name as sent_by_name'
+    )
+    .orderBy('mt.responded_at', 'desc')
+    .limit(20);
+
+  ok(res, transfers);
+});
+
+/**
  * GET /api/worker/transfers/outgoing
  * Transfers sent by this worker
  */
@@ -43,7 +71,7 @@ router.get('/outgoing', async (req: Request, res: Response) => {
   const db = req.tenantDb!;
 
   const transfers = await db('material_transfers as mt')
-    .join('lots as l', 'mt.lot_id', 'l.id')
+    .leftJoin('lots as l', 'mt.lot_id', 'l.id')
     .join('stages as fs', 'mt.from_stage_id', 'fs.id')
     .join('stages as ts', 'mt.to_stage_id', 'ts.id')
     .where({ 'mt.requested_by': req.user!.sub })
@@ -166,6 +194,15 @@ router.put('/:id/reject', async (req: Request, res: Response) => {
   const transfer = await db('material_transfers').where({ id: req.params.id, status: 'pending' }).first();
   if (!transfer) { notFound(res, 'Transfer not found or already processed'); return; }
 
+  // Verify rejecting worker is assigned to the destination stage
+  const assignment = await db('user_stage_assignments')
+    .where({ user_id: req.user!.sub, stage_id: transfer.to_stage_id })
+    .first();
+  if (!assignment) {
+    badRequest(res, 'You are not assigned to the destination stage of this transfer');
+    return;
+  }
+
   await db('material_transfers').where({ id: req.params.id }).update({
     status: 'rejected',
     accepted_by: req.user!.sub,
@@ -174,6 +211,22 @@ router.put('/:id/reject', async (req: Request, res: Response) => {
   });
 
   ok(res, null, 'Transfer rejected');
+});
+
+/**
+ * DELETE /api/worker/transfers/:id
+ * Sender cancels (deletes) their own pending transfer
+ */
+router.delete('/:id', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+  const transfer = await db('material_transfers')
+    .where({ id: req.params.id, requested_by: req.user!.sub, status: 'pending' })
+    .first();
+
+  if (!transfer) { notFound(res, 'Transfer not found or cannot be cancelled'); return; }
+
+  await db('material_transfers').where({ id: req.params.id }).delete();
+  ok(res, null, 'Transfer cancelled');
 });
 
 export default router;

@@ -16,6 +16,11 @@ export async function patchAllTenantSchemas(orgSlugs: string[]): Promise<void> {
     try {
       // Add unit column to stage_transactions (idempotent)
       await db.raw(`ALTER TABLE stage_transactions ADD COLUMN IF NOT EXISTS unit VARCHAR(20) DEFAULT 'kg'`);
+
+      // Fix loss_qty formula: loss = processed - output (instock is auto = input - processed)
+      await db.raw(`ALTER TABLE stage_transactions DROP COLUMN IF EXISTS loss_qty`);
+      await db.raw(`ALTER TABLE stage_transactions ADD COLUMN loss_qty NUMERIC(12,3) GENERATED ALWAYS AS (processed_qty - output_qty) STORED`);
+
       logger.info(`Schema patched: ${schema}`);
     } catch (err: any) {
       logger.warn(`Schema patch skipped for ${schema}: ${err.message}`);
@@ -194,7 +199,7 @@ async function runTenantMigrations(db: Knex, schema: string): Promise<void> {
       processed_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
       instock_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
       output_qty NUMERIC(12,3) NOT NULL DEFAULT 0,
-      loss_qty NUMERIC(12,3) GENERATED ALWAYS AS (processed_qty - output_qty - instock_qty) STORED,
+      loss_qty NUMERIC(12,3) GENERATED ALWAYS AS (processed_qty - output_qty) STORED,
       notes TEXT,
       status VARCHAR(20) DEFAULT 'completed' CHECK (status IN ('pending','completed')),
       created_at TIMESTAMPTZ DEFAULT NOW(),

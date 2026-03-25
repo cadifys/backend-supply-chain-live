@@ -108,7 +108,6 @@ router.post('/', async (req: Request, res: Response) => {
     transactionDate: z.string().optional(),
     inputQty: z.number().min(0),
     processedQty: z.number().min(0),
-    instockQty: z.number().min(0).default(0),
     outputQty: z.number().min(0),
     notes: z.string().optional(),
   });
@@ -116,13 +115,21 @@ router.post('/', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { badRequest(res, 'Validation failed', parsed.error.flatten()); return; }
 
-  const { lotId, stageId, machineId, unit, transactionDate, inputQty, processedQty, instockQty, outputQty, notes } = parsed.data;
+  const { lotId, stageId, machineId, unit, transactionDate, inputQty, processedQty, outputQty, notes } = parsed.data;
 
-  // Validate quantities: output + instock <= processed (remainder = loss)
-  if (outputQty + instockQty > processedQty + 0.0001) { // small epsilon for float rounding
-    badRequest(res, 'Output + In-stock quantity cannot exceed processed quantity');
+  // Processed cannot exceed what was received (input)
+  if (processedQty > inputQty + 0.0001) {
+    badRequest(res, 'Processed quantity cannot exceed Input quantity');
     return;
   }
+  // Output cannot exceed what was processed
+  if (outputQty > processedQty + 0.0001) {
+    badRequest(res, 'Output quantity cannot exceed Processed quantity');
+    return;
+  }
+
+  // Auto-calculate in-stock: material received but not yet processed
+  const instockQty = Math.max(0, inputQty - processedQty);
 
   const db = req.tenantDb!;
 
@@ -190,6 +197,64 @@ router.get('/:id', async (req: Request, res: Response) => {
 
   if (!transaction) { notFound(res, 'Transaction not found'); return; }
   ok(res, transaction);
+});
+
+/**
+ * PUT /api/worker/transactions/:id
+ * Worker edits their own transaction — today's entries only
+ */
+router.put('/:id', async (req: Request, res: Response) => {
+  const schema = z.object({
+    inputQty:     z.number().min(0).optional(),
+    processedQty: z.number().min(0).optional(),
+    outputQty:    z.number().min(0).optional(),
+    unit:         z.string().optional(),
+    notes:        z.string().nullable().optional(),
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { badRequest(res, 'Validation failed', parsed.error.flatten()); return; }
+
+  const db = req.tenantDb!;
+  const today = new Date().toISOString().split('T')[0];
+
+  const tx = await db('stage_transactions')
+    .where({ id: req.params.id, worker_id: req.user!.sub })
+    .whereRaw(`transaction_date::date = ?`, [today])
+    .first();
+
+  if (!tx) { notFound(res, 'Transaction not found or only today\'s entries can be edited'); return; }
+
+  const d = parsed.data;
+  const finalInput = d.inputQty     !== undefined ? d.inputQty     : Number(tx.input_qty);
+  const finalProc  = d.processedQty !== undefined ? d.processedQty : Number(tx.processed_qty);
+  const finalOut   = d.outputQty    !== undefined ? d.outputQty    : Number(tx.output_qty);
+
+  if (finalProc > finalInput + 0.0001) {
+    badRequest(res, 'Processed cannot exceed Input');
+    return;
+  }
+  if (finalOut > finalProc + 0.0001) {
+    badRequest(res, 'Output cannot exceed Processed');
+    return;
+  }
+
+  // Recalculate in-stock: input - processed
+  const instockQty = Math.max(0, finalInput - finalProc);
+
+  const updates: Record<string, any> = { updated_at: new Date(), instock_qty: instockQty };
+  if (d.inputQty     !== undefined) updates.input_qty     = d.inputQty;
+  if (d.processedQty !== undefined) updates.processed_qty = d.processedQty;
+  if (d.outputQty    !== undefined) updates.output_qty    = d.outputQty;
+  if (d.unit         !== undefined) updates.unit          = d.unit;
+  if (d.notes        !== undefined) updates.notes         = d.notes;
+
+  const [updated] = await db('stage_transactions')
+    .where({ id: req.params.id })
+    .update(updates)
+    .returning('*');
+
+  ok(res, updated, 'Transaction updated');
 });
 
 export default router;

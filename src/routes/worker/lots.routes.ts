@@ -27,6 +27,26 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/worker/lots/search?q=
+ * Search all active lots by lot_number (not restricted to worker's current stage)
+ */
+router.get('/search', async (req: Request, res: Response) => {
+  const db = req.tenantDb!;
+  const q = (req.query.q as string || '').trim();
+  if (!q) { ok(res, []); return; }
+
+  const lots = await db('lots as l')
+    .leftJoin('stages as s', 'l.current_stage_id', 's.id')
+    .where({ 'l.status': 'active' })
+    .whereRaw('LOWER(l.lot_number) LIKE LOWER(?)', [`%${q}%`])
+    .select('l.id', 'l.lot_number', 'l.crop', 'l.variety', 'l.total_qty', 'l.unit', 's.name as stage_name', 'l.current_stage_id')
+    .orderBy('l.lot_number')
+    .limit(10);
+
+  ok(res, lots);
+});
+
+/**
  * GET /api/worker/lots/:id
  */
 router.get('/:id', async (req: Request, res: Response) => {
