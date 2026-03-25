@@ -173,11 +173,14 @@ router.put('/:id/accept', async (req: Request, res: Response) => {
       responded_at: new Date(),
     });
 
-    // Move lot to the to_stage
-    await trx('lots').where({ id: transfer.lot_id }).update({
-      current_stage_id: transfer.to_stage_id,
-      updated_at: new Date(),
-    });
+    // Move lot to the to_stage and update qty to what was actually transferred
+    if (transfer.lot_id) {
+      await trx('lots').where({ id: transfer.lot_id }).update({
+        current_stage_id: transfer.to_stage_id,
+        total_qty: transfer.qty,
+        updated_at: new Date(),
+      });
+    }
   });
 
   ok(res, null, 'Transfer accepted');

@@ -16,11 +16,27 @@ router.get('/', async (req: Request, res: Response) => {
 
   if (!assignments.length) { ok(res, []); return; }
 
+  // Subtract pending outgoing transfer qtys so the sender sees effective remaining qty.
+  // Lots where everything is pending transfer are hidden (effective qty = 0).
   const lots = await db('lots as l')
     .leftJoin('stages as s', 'l.current_stage_id', 's.id')
+    .leftJoin(
+      db('material_transfers')
+        .where({ status: 'pending' })
+        .whereNotNull('lot_id')
+        .groupBy('lot_id')
+        .select('lot_id', db.raw('SUM(qty) as pending_qty'))
+        .as('p'),
+      'l.id', 'p.lot_id'
+    )
     .whereIn('l.current_stage_id', assignments)
     .where({ 'l.status': 'active' })
-    .select('l.id', 'l.lot_number', 'l.crop', 'l.variety', 'l.total_qty', 'l.unit', 'l.intake_date', 's.name as stage_name')
+    .whereRaw('GREATEST(l.total_qty - COALESCE(p.pending_qty, 0), 0) > 0')
+    .select(
+      'l.id', 'l.lot_number', 'l.crop', 'l.variety',
+      db.raw('GREATEST(l.total_qty - COALESCE(p.pending_qty, 0), 0) as total_qty'),
+      'l.unit', 'l.intake_date', 'l.current_stage_id', 's.name as stage_name'
+    )
     .orderBy('l.intake_date', 'desc');
 
   ok(res, lots);
