@@ -21,6 +21,7 @@ export const env = {
     name: optional('CENTRAL_DB_NAME', 'manufacturing_hub'),
     user: optional('CENTRAL_DB_USER', 'postgres'),
     password: optional('CENTRAL_DB_PASSWORD', 'postgres'),
+    ssl: optional('CENTRAL_DB_SSL', 'false') === 'true',
   },
 
   jwt: {

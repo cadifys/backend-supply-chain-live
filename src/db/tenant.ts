@@ -45,6 +45,7 @@ export function getTenantDb(orgSchema: string): Knex {
       database: env.db.name,
       user: env.db.user,
       password: env.db.password,
+      ssl: env.db.ssl ? { rejectUnauthorized: false } : false,
     },
     pool: {
       min: 1,
@@ -78,6 +79,7 @@ export async function bootstrapTenantSchema(orgSchema: string): Promise<void> {
       database: env.db.name,
       user: env.db.user,
       password: env.db.password,
+      ssl: env.db.ssl ? { rejectUnauthorized: false } : false,
     },
   });
 

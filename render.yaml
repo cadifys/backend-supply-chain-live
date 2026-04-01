@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: kalash-supply-chain-backend
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: CENTRAL_DB_SSL
+        value: true

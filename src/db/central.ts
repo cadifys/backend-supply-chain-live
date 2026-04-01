@@ -10,6 +10,7 @@ const centralConfig: Knex.Config = {
     database: env.db.name,
     user: env.db.user,
     password: env.db.password,
+    ssl: env.db.ssl ? { rejectUnauthorized: false } : false,
   },
   pool: {
     min: 2,

@@ -9,6 +9,7 @@ const config: Knex.Config = {
     database: env.db.name,
     user: env.db.user,
     password: env.db.password,
+    ssl: env.db.ssl ? { rejectUnauthorized: false } : false,
   },
   migrations: {
     directory: './migrations/central',
