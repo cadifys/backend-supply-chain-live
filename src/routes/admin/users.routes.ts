@@ -81,7 +81,7 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const [user] = await trx('users').insert({
       name, email, phone, password_hash: passwordHash, role, created_by: req.user!.sub,
-    }).returning('id', 'name', 'email', 'phone', 'role', 'is_active', 'created_at');
+    }).returning(['id', 'name', 'email', 'phone', 'role', 'is_active', 'created_at']);
 
     if (stageIds?.length) {
       await trx('user_stage_assignments').insert(
@@ -126,7 +126,7 @@ router.put('/:id', async (req: Request, res: Response) => {
 
   const trx = await db.transaction();
   try {
-    const [updated] = await trx('users').where({ id: req.params.id }).update(updates).returning('id', 'name', 'email', 'phone', 'role', 'is_active');
+    const [updated] = await trx('users').where({ id: req.params.id }).update(updates).returning(['id', 'name', 'email', 'phone', 'role', 'is_active']);
 
     if (stageIds !== undefined) {
       await trx('user_stage_assignments').where({ user_id: req.params.id }).delete();

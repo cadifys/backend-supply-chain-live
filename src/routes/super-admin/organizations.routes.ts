@@ -104,7 +104,7 @@ router.post('/', async (req: Request, res: Response) => {
       phone: adminPhone,
       password_hash: passwordHash,
       created_by: req.user!.sub,
-    }).returning('id', 'name', 'email', 'phone', 'is_active', 'created_at');
+    }).returning(['id', 'name', 'email', 'phone', 'is_active', 'created_at']);
 
     await trx.commit();
   } catch (err) {
@@ -201,7 +201,7 @@ router.post('/:id/admins', async (req: Request, res: Response) => {
     phone: parsed.data.phone,
     password_hash: passwordHash,
     created_by: req.user!.sub,
-  }).returning('id', 'name', 'email', 'phone', 'is_active', 'created_at');
+  }).returning(['id', 'name', 'email', 'phone', 'is_active', 'created_at']);
 
   created(res, { ...admin, tempPassword: parsed.data.password ? undefined : tempPassword });
 });
